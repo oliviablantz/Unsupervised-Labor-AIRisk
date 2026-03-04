@@ -1,0 +1,1204 @@
+---
+title: "Midterm Project"
+output: html_document
+author: "Olivia Blantz"
+course: "Advanced Modeling UC3M"
+date: "2026-02-19"
+---
+
+```{r setup, include=TRUE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# An Unsupervised Analysis of the U.S. Job Market: Patterns of Market Outlooks, Wages, and Skill Requirements
+
+Olivia Blantz - Advanced Modeling UC3M, 2026
+
+------------------------------------------------------------------------
+
+## Index
+
+**PART 1:** [Introduction and Research Questions](#introduction)
+
+**PART 2:** [Data Preparation](#data-preparation)
+
+**PART 3:** [Exploratory Data Analysis](#exploratory-data-analysis)
+
+**PART 4:** [PCA](#principal-component-analysis)
+
+**PART 5:** [K-means and Hierarchical Clustering](#clustering)
+
+**PART 6:** [Conclusion and Findings](#conclusions-findings-and-limitations)
+
+------------------------------------------------------------------------
+
+## Libraries
+
+```{r libs_seed}
+
+library(tidyverse)
+library(readxl)
+library(janitor) 
+library(corrplot)
+library(stringr)
+library(GGally) 
+library(factoextra) 
+library(plotly)
+library(ggrepel)
+library(dplyr)
+# clustering
+library(cluster)
+library(mclust)
+
+#set seed
+set.seed(651) #studentid
+```
+
+------------------------------------------------------------------------
+
+## 1. Introduction {#introduction}
+
+The development of artificial intelligence is reshaping the labor market in ways that are uneven across occupations. Contrary to historical trends, there is an increasingly wide variety of jobs (rather than just those in manual fields) that face automation vulnerability. Understanding hidden patterns in labor market data could help develop new ways we can interpret the job market past our simple "sector" classifications.
+
+This project will apply feature engineering to construct an occupation-level data set from three public data sources which examine U.S. occupations. Then, it will use the unsupervised learning methods of Principal Component Analysis (PCA) and Clustering to reveal the underlying structure of the U.S. labor market, including AI-related vulnerability that transcends traditional occupational groupings.
+
+------------------------------------------------------------------------
+
+[**Research Question...**]{.underline}
+
+> *Can U.S. occupations be grouped into meaningful clusters based on their labor market outlook, wages, and characteristics? Furthermore, what might the clusters reveal about which workers face the biggest risk of AI replacement?*
+
+------------------------------------------------------------------------
+
+## 2. Data Preparation {#data-preparation}
+
+This project merges 3 data sets, using the SOC (Standard Occupational Classification) code variable as the common identifier. This code is the standard system for classifying occupations in the United States. From this code, we also derive the occupation title and the job sector of each occupation.
+
+Our 3 data sets and the derived variables from each are...
+
+-   [**BLS Employment Projections (2024–2034)**](https://www.bls.gov/emp/)
+
+    -   [Employment Percentage Change]{.underline}: "The projected percent change in total employment for each occupation between 2024 and 2034, reflecting expected growth or decline in labor demand over the coming decade."
+    -   [Annual Openings]{.underline}: "The projected average number of job openings per year between 2024 and 2034, including both new positions and replacement demand from workers who retire or change occupations."
+    -   [Median Wage]{.underline}: "The median annual earnings in US dollars for full-time workers in each occupation as of 2024."
+    -   [Education Level]{.underline}: "The typical level of education required to enter each occupation."
+
+-   [**Felten et al. (2021), Strategic Management Journal**](https://sms.onlinelibrary.wiley.com/doi/full/10.1002/smj.3286)
+
+    -   [AIOE]{.underline} (AI Occupational Exposure Score): Measuring the degree an occupations required skills overlap with AI capabilities. Built using 52 O\*NET occupational abilities, weighted by their relevance in each occupation. 0 indicates an average exposure to AI, making this a comparative variable.
+
+-   [**O\*NET Work Activities Database**](https://www.onetcenter.org/dictionary/30.2/excel/work_activities.html)
+
+    -   [Routine Task Score:]{.underline} A feature engineered variable that averages 2 O\*NET variables ("repeating same physical activities" and "performing general physical activities"). Meant to capture the degree of routine physical labor.
+    -   [Creative Thinking]{.underline}: The degree to which an occupation requires..."developing, designing, or creating new ideas, relationships, systems, or products".
+
+-   [**O\*NET** **Work Context Database**](https://www.onetcenter.org/dictionary/30.2/excel/work_context.html)
+
+    -   [Physical Hazard Exposure]{.underline}: How frequently workers are exposed to hazardous environmental conditions on the job, rated on a 1–5 frequency scale.
+    -   [Consequence of Errors]{.underline}: How serious the outcomes of worker mistakes are, capturing the stakes associated with errors in each occupation, rated on a 1–5 scale.
+    -   [Time Pressure]{.underline}: How frequently workers must meet strict deadlines or work under time constraints, rated on a 1–5 frequency scale.
+    -   [Contact with Others]{.underline}: The degree to which a job requires workers to be in contact with colleagues, clients, or the public, as part of their daily work, rated on a 1–5 scale.
+    -   [Degree of Automation]{.underline}: The extent to which the tasks in an occupation are already performed by automated equipment or computerized systems, rated on a 1–5 scale.
+
+The final data set contains 15 variables. Of those, 12 are numeric, meant to measure labor market outlook, compensation and entry barriers, and characteristics.
+
+The complete steps of cleaning the raw data is documented below for clarity (Sections 2.1-2.5), and the final clean data is saved after the feature engineering is completed in EDA.
+
+------------------------------------------------------------------------
+
+#### 2.1 BLS Occupation Projections
+
+Our first data set will be from Table 1.2 from the Bureau of Labor Statistics (BLS) Employment Projections. It is necessary to filter for the "line item" rows which represent each individual occupation. Then, we also rename and select all our relevant variables.
+
+```{r blsdata}
+bls <- read_excel("occupation.xlsx", sheet = "Table 1.2", skip = 1) |>
+  clean_names() |>
+  filter(occupation_type == "Line item") |>
+  rename(
+    soc_code = x2024_national_employment_matrix_code,
+    occupation = x2024_national_employment_matrix_title,
+    emp_change_pct = employment_change_percent_2024_34,
+    annual_openings = occupational_openings_2024_34_annual_average,
+    median_wage = median_annual_wage_dollars_2024_1,
+    education = typical_education_needed_for_entry
+  ) |>
+  select(soc_code, occupation, emp_change_pct,
+         annual_openings, median_wage, education) |>
+mutate(
+  soc_code = str_trim(soc_code),
+  median_wage = str_remove_all(median_wage, "[>=<$,]"), 
+  median_wage = str_trim(median_wage),
+  median_wage = as.numeric(median_wage),
+  emp_change_pct = as.numeric(emp_change_pct),
+  annual_openings = as.numeric(annual_openings))
+
+bls
+```
+
+[**Encoding the Education Variable**]{.underline}
+
+The `education` variable in this data set is originally encoded as a text variable (ex, "Bachelor's degree"). Because education level as a concept has a clear ordinal structure, we can encode it as a 1–8 integer variable. This way, we can convert the categorical variable into a numeric one while preserving it's meaningful order.
+
+```{r blsedu}
+bls <- bls |>
+  mutate(education_num = case_when(
+    education == "No formal educational credential" ~ 1,
+    education == "High school diploma or equivalent" ~ 2,
+    education == "Some college, no degree" ~ 3,
+    education == "Postsecondary nondegree award" ~ 4,
+    education == "Associate's degree" ~ 5,
+    education == "Bachelor's degree" ~ 6,
+    education == "Master's degree" ~ 7,
+    education == "Doctoral or professional degree" ~ 8
+  )) |>
+  select(-education)
+
+glimpse(bls)
+```
+
+[**Deriving Occupation Sector**]{.underline}
+
+We are going to use SOC code as our unifying variable across all our data sets. The first two digits of the SOC code identify the occupations "group" or sector, and occupations with similar characteristics will share these first two identifying numbers. We will extract this as a `sector` categorical variable using the BLS guide, which could later help with our interpretations.
+
+```{r blssect}
+bls <- bls |>
+  mutate(sector = case_when(
+    str_starts(soc_code, "11") ~ "Management",
+    str_starts(soc_code, "13") ~ "Business & Financial",
+    str_starts(soc_code, "15") ~ "Computer & Math",
+    str_starts(soc_code, "17") ~ "Architecture & Engineering",
+    str_starts(soc_code, "19") ~ "Life & Physical Science",
+    str_starts(soc_code, "21") ~ "Community & Social Service",
+    str_starts(soc_code, "23") ~ "Legal",
+    str_starts(soc_code, "25") ~ "Education",
+    str_starts(soc_code, "27") ~ "Arts & Media",
+    str_starts(soc_code, "29") ~ "Healthcare Practitioners",
+    str_starts(soc_code, "31") ~ "Healthcare Support",
+    str_starts(soc_code, "33") ~ "Protective Service",
+    str_starts(soc_code, "35") ~ "Food Preparation",
+    str_starts(soc_code, "37") ~ "Building & Grounds",
+    str_starts(soc_code, "39") ~ "Personal Care",
+    str_starts(soc_code, "41") ~ "Sales",
+    str_starts(soc_code, "43") ~ "Office & Admin Support",
+    str_starts(soc_code, "45") ~ "Farming & Fishing",
+    str_starts(soc_code, "47") ~ "Construction",
+    str_starts(soc_code, "49") ~ "Installation & Repair",
+    str_starts(soc_code, "51") ~ "Production",
+    str_starts(soc_code, "53") ~ "Transportation",
+    TRUE ~ "Other"
+  ))
+
+glimpse(bls)
+```
+
+------------------------------------------------------------------------
+
+#### 2.2 AIOE: AI Occupational Exposure Score
+
+The [AIOE score](https://github.com/AIOE-Data/AIOE) was developed by Edward Felten, Manav Raj, and Robert Seamans, and published in the *Strategic Management Journal* in 2021. It is constructed by comparing AI application capability benchmarks to the human abilities required by each occupation (as defined and measured in a separate O\*NET dataset of work abilities).
+
+It produces a continuous score, where a value of 0 indicates average AI exposure. It is important to understand that it is therefore a comparative rather than an absolute risk score. Values above 0 show increased comparative risk, and values below a decreased comparative risk. We will again use SOC code as our unifying variable.
+
+It is also important to note that this does not capture pure "automation", such as robotics or mechanical improvements to factory work. It focuses purely on software capabilities. A different variable (`degree_of_automation`) will be taken from our O\*NET database to capture this discrepancy.
+
+```{r aioe}
+aioe <- read_excel("AIOE_DataAppendix.xlsx", sheet = "Appendix A") |>
+  clean_names() |>
+  rename(ai_exposure = aioe) |>
+  select(soc_code, ai_exposure) |>
+  mutate(soc_code = str_trim(soc_code)) #take off white space
+aioe
+```
+
+------------------------------------------------------------------------
+
+#### 2.3 O\*NET Work Activities
+
+Our final data sets will be from the O\*NET, the first being the Work Activities database. We will extract three items using their element IDs, and then we will engineer a new variable `routine_task_score` by averaging: how repetitive an occupation is, and how physically demanding it is. The variable `thinking_creatively` is retained as a separate variable to capture the opposite end of this same spectrum, being jobs that are more cognitively nuanced.
+
+```{r onetact}
+work_activities <- read_excel("Work Activities.xlsx") |>
+  clean_names() |>
+  rename(soc_code = o_net_soc_code) |>
+  mutate(soc_code = str_remove(str_trim(soc_code), "\\.\\d+$")) |>
+  filter(element_id %in% c("4.A.1.b.2", "4.A.3.b.4", "4.A.2.b.2"),
+         scale_id == "IM") |>
+  select(soc_code, element_id, data_value) |>
+  pivot_wider(names_from  = element_id,
+              values_from = data_value,
+              values_fn = mean) |>
+  rename(
+    repeating_tasks = `4.A.1.b.2`,
+    physical_activity = `4.A.3.b.4`,
+    thinking_creatively = `4.A.2.b.2`
+  ) |>
+  mutate(
+    routine_task_score = rowMeans(cbind(repeating_tasks, physical_activity), na.rm = TRUE)
+  ) |>
+  select(soc_code, routine_task_score, thinking_creatively)
+
+work_activities
+```
+
+------------------------------------------------------------------------
+
+#### 2.4 O\*NET Work Context
+
+Finally, we extract five variables from the Work Context database. These capture physical risk, gravity of error, time demands, social interaction, and current degree of automation.
+
+| Variable               | Interpretation (as found on O\*NET)           |
+|------------------------|-----------------------------------------------|
+| `consequence_of_error` | Gravity of potential errors (1–5)             |
+| `time_pressure`        | Frequency of time pressure (1–5)              |
+| `physical_hazard`      | Exposure to hazardous conditions (1–5)        |
+| `contact_with_others`  | Degree/Frequency of contact with others (1–5) |
+| `degree_of_automation` | How automated is the work already? (1–5)      |
+
+```{r onetcontext}
+work_context <- read_excel("Work Context.xlsx") |>
+  clean_names() |>
+  rename(soc_code = o_net_soc_code) |>
+  mutate(soc_code = str_remove(str_trim(soc_code), "\\.\\d+$")) |>
+  filter(element_id %in% c(
+    "4.C.3.a.1",    # consequence of error
+    "4.C.3.d.1",    # time pressure
+    "4.C.2.c.1.d",  # exposure to hazards
+    "4.C.1.a.4",    # contact with others
+    "4.C.3.b.2"     # degree of automation
+  ),
+  scale_id == "CX") |>
+  select(soc_code, element_id, data_value) |>
+  pivot_wider(names_from  = element_id,
+              values_from = data_value,
+              values_fn = mean) |>
+  rename(
+    consequence_of_error = `4.C.3.a.1`,
+    time_pressure = `4.C.3.d.1`,
+    physical_hazard = `4.C.2.c.1.d`,
+    contact_with_others = `4.C.1.a.4`,
+    degree_of_automation = `4.C.3.b.2`
+  ) |>
+  mutate(across(where(is.numeric), as.numeric))
+
+work_context
+```
+
+------------------------------------------------------------------------
+
+#### 2.5 Merging Data
+
+All data sets are joined via SOC code using inner joins. This is to keep only the occupations that are present in all the tables. Then, we will drop any remaining NA's and confirm our final data set.
+
+```{r datamerge}
+messy_data <- bls |>
+  inner_join(aioe, by = "soc_code") |>
+  inner_join(work_activities, by = "soc_code") |>
+  inner_join(work_context, by = "soc_code") |>
+  drop_na() |>
+  select(
+    # categorical variables
+    soc_code,
+    occupation,
+    sector,
+    # numeric variables
+    ai_exposure,        
+    emp_change_pct,       
+    annual_openings,      
+    median_wage,         
+    education_num,        
+    routine_task_score,  
+    thinking_creatively,  
+    physical_hazard,      
+    consequence_of_error, 
+    time_pressure,        
+    contact_with_others,  
+    degree_of_automation
+  )
+```
+
+An important note is that this merge uses `drop_na` rather than imputing for missing values with `mice`. This is because the missingness in our data is structural, and comes from cross-source merging rather than incomplete measurement. This would make computing for those occupations missing from certain datasets inappropriate.
+
+------------------------------------------------------------------------
+
+**Dataset Summary**
+
+Here, we take a look at our final data set. We end with 15 variables (3 being categorical, the rest being numeric), and 665 observations.
+
+```{r datatsummary}
+glimpse(messy_data)
+summary(messy_data)
+```
+
+------------------------------------------------------------------------
+
+## 3. Exploratory Data Analysis {#exploratory-data-analysis}
+
+#### 3.1 Distribution of Variables
+
+Before performing any PCA, we must examine the distributions of the numeric variables. This helps detect outliers or skewness that could distort our results. First, we check the variable summaries...
+
+```{r numeric}
+ messy_data |> 
+  select(where(is.numeric)) |>
+  summary()
+```
+
+These summary statistics reveal several patterns relevant to the analysis.
+
+Importantly, the mean `ai_exposure` of -0.023 is close to zero, as expected given the AIOE's standardized construction. However, the median of -0.144 indicates that more than half of occupations in this sample falls below the average after dropping NA's.
+
+`education_num` has a median of 2 and a mean of 3.69, reflecting that the most common requirement in the dataset is a high school diploma. The mean is pulled upward by the substantial number of occupations which require degrees.
+
+`emp_change_pct` ranges from - 36.1% to + 49.9%, which represents there are some rapidly expanding and rapidly declining occupations in the data.
+
+All the O\*NET variables fall within their expected 1–5 scale ranges. `contact_with_others` stands out with a median of 4.40, which suggests that most occupations in this dataset involve frequent interaction with others.
+
+`log_median_wage` ranges from 10.31 to 12.39, which corresponds to roughly \$30,000 to \$240,000 in original dollars.
+
+[**Distribution Histograms**]{.underline}
+
+We can also visualize the distributions with a histogram.
+
+```{r dist}
+messy_data |> 
+  select(ai_exposure,        
+    emp_change_pct,       
+    annual_openings,      
+    median_wage,         
+    education_num,        
+    routine_task_score,  
+    thinking_creatively,  
+    physical_hazard,      
+    consequence_of_error, 
+    time_pressure,        
+    contact_with_others,  
+    degree_of_automation) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "value") |>
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "#2E75B6", color = "white", alpha = 0.85) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(title = "Numeric Variables Distributions",
+       x = NULL, y = "Count") +
+  theme_minimal() 
+```
+
+Some notes about our results...
+
+-   `median_wage`, and `annual_openings` are skewed hard to the right. This could be an issue for our PCA, as it could dominate and be given more importance in our principal components. We can try applying the log transformation to `median_wage` and log1p to `annual_openings` (as there might be some observations near 0) to combat this affect.
+-   `physical_hazard` also shows a right skew, but after examining it more closely, a transformation does not help with it's largely observed 0 values, and therefore the raw data will simply be scaled for PCA.
+-   Our `ai_exposure` appears to follow a bimodal distribution with a slight skew to the right.
+-   `degree_of_automation` is roughly normally distributed, and centered around 2.
+-   `education_num` is discrete, and is worth keeping in mind as it could cause some problems. There seems to be a peak around 2 (high school level education) and 6 (a university degree).
+-   `routine_task_score` gives us two peaks, which will probably be revealed in our clustering.
+
+Let's perform our log transformations to `median_wage` and `annual_openings`, and reexamine the distributions.
+
+```{r datatrans}
+messy_data <- messy_data |>
+  mutate(log_median_wage = log(median_wage), 
+         log1p_annual_openings = log1p(annual_openings)) |>
+  select(-median_wage, -annual_openings)
+
+messy_data |>
+  select(log_median_wage,
+         log1p_annual_openings) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "value") |>
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "#2E75B6", color = "white", alpha = 0.85) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(title = "New Log and Log1P Distributions",
+       x = NULL, y = "Count") +
+  theme_minimal() 
+
+```
+
+Our distributions has improved, and is now more suitable for PCA.
+
+Now, we can code our final csv file with clean data.
+
+```{r clean-data}
+#write clean csv
+write.csv(messy_data, "midterm_data.csv", row.names = FALSE)
+#load clean data 
+data <- read.csv("midterm_data.csv")
+```
+
+------------------------------------------------------------------------
+
+#### 3.2. AI Exposure by Sector
+
+Here, we plot the sectors, which are the "natural" clusters occurring in occupation data, for their average AI exposure. We can already see that it varies substantially across different fields. High-skill sectors like Computer & Math and Legal show the highest exposure, and we can also see the fields of Education and Life & Physical Science. The more "hands-on" fields, such as Construction, show the lowest.
+
+```{r sectexp}
+data |>
+  group_by(sector) |>
+  summarise(mean_ai = mean(ai_exposure, na.rm = TRUE)) |>
+  arrange(mean_ai) |>
+  mutate(sector = fct_inorder(sector)) |>
+  ggplot(aes(x = mean_ai, y = sector, fill = mean_ai)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_gradient(low = "#AED6F9", high = "#1A5276") +
+  labs(title = "Mean AI Exposure Score by Occupational Sector",
+       x = "Mean AIOE Score", y = NULL) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10))
+```
+
+------------------------------------------------------------------------
+
+#### 3.3 Correlation Matrix
+
+A vital step before applying PCA is to examine correlations among the numeric variables in our data. We must check that there is some degree of correlation between variables, as it is a requirement of PCA. If all variables were completely independent, then the PCA would serve no purpose. We can check the correlation of our data with a correlation matrix.
+
+```{r corr}
+cor_matrix <- cor(
+  data |> select(where(is.numeric)),
+  use = "complete.obs"
+)
+
+corrplot(cor_matrix,
+         method = "color",
+         type = "upper",
+         tl.cex = 0.75,
+         tl.col = "black",
+         addCoef.col = "black",
+         number.cex  = 0.55,
+         col = COL2("RdBu", 10),
+         diag = FALSE,
+         title = "Correlation Matrix of Numeric Variables",
+         mar = c(0, 0, 1.5, 0))
+```
+
+Our matrix exposes some patterns...
+
+-   Our strongest positive correlation fall at 0.76, between `routine_task_score` and `physical_hazard.`
+
+-   The strongest negative correlation is between `ai_exposure` and `routine_task_score` with -0.74.
+
+-   There is also positive correlation with education and the log odds of median wage.
+
+-   There is a strong positive correlation between AI exposure and education, which follows the logic of the most exposed sectors being those in the computer and maths and legal fields.
+
+The principal take away is that we have enough correlation in our data to continue with PCA.
+
+------------------------------------------------------------------------
+
+#### 3.4 EDA Conclusions
+
+In this project, feature engineering included standardizing SOC codes across 3 sources, ordinal encoding of the `education` variable, deriving the `sector` label from SOC code prefixes, and constructing a new `routine_task_score` variable from two existing variables in the O\*NET database.
+
+Our final dataset contains 12 numeric variables meant to quantify the labor market across three dimensions: the outlook, compensation and entry barriers, and job skills. Our final dataset contains 665 observations.
+
+Exploratory data analysis revealed non-normality in a few variables, resulting in the decision to apply to log transformation to our `median_wage` variable and the log1p transformation to our `annual_openings` variable. We also saw that AI exposure is higher in high-skill, high-wage, cognitively demanding jobs. Finally, we saw that our correlations between variables are appropriate for PCA.
+
+------------------------------------------------------------------------
+
+## 4. Principal Component Analysis {#principal-component-analysis}
+
+#### 4.1 Introduction
+
+Rather than a single variable, multiple variables such as wages, education requirements, and task structure, all interact to shape the U.S. job market. In this case, PCA might allow for the construction of a single "index", or fewer elements that capture the variability caused by these individual variables. The goal is to capture the underlying structure of job market data.
+
+------------------------------------------------------------------------
+
+#### 4.2 Pre-Processing for PCA
+
+Before applying PCA, we can isolate the numeric matrix and save occupation labels and sector groupings to use later in our plots.
+
+```{r num_and_labels}
+# numeric matrix for PCA saved as X
+X <- data |>
+  select(where(is.numeric))
+
+# save labels for plots
+occ_names <- data$occupation
+occ_sector <- data$sector
+```
+
+[**Standardizing the Variables...**]{.underline}
+
+We must use standardized variables for PCA. This is essential because our variables are measured in completely different units: some in dollars, percentages, 1–5 O\*NET scales, and the continuous AIOE score. If we don't scale, then variables with larger ranges would dominate in our components.
+
+```{r standardize}
+# variable distributions before and after scaling
+boxplot(X, las = 2, col = "lightblue",
+        main = "Variable Distributions (Original Scale)",
+        cex.axis = 0.65)
+
+boxplot(scale(X), las = 2, col = "steelblue",
+        main = "Variable Distributions (Standardised)",
+        cex.axis = 0.65)
+```
+
+In the original scale, `emp_change_pct` dominates the plot with extreme outliers which compress every other variable near zero. After standardization, all variables are centered at zero, but they have comparable spreads. Even after scaling, `emp_change_pct` has the most extreme outliers. This may reflect the occupations with very rapid growth or sharp decline. `time_pressure` and `contact_with_others` show clusters of low outliers below -3, which likely corresponds to self-paced or more soletary occupations. The O\*NET variables (meant to capture job skill characteristics) have good distributions after scaling.
+
+------------------------------------------------------------------------
+
+#### 4.3 Computing PCA
+
+```{r computepca}
+# Compute PCA using correlation matrix (scale. = TRUE)
+pca <- prcomp(X, scale. = TRUE)
+pca
+
+# variance explained by each component
+summary(pca)
+
+#structure of pca results
+names(pca)
+```
+
+For PC1 (representing 30.8% of variance), the largest loading in the negative direction are exposure to AI and education, while the largest loading in the positive direction is routine task score. PC1 appears to represent the differences between cognitively demanding and higher wage occupations versus physical and routine occupations. We could classify this as the axis between cognitively complex occupations and manual labor.
+
+PC2 (representing 16.7% of variance) appears to be the higher stake, physically demanding work. Almost all the elements appear to be positively loaded, including the consequence of the error, physical hazards, and the log of the median wage. Th negative loadings include log annual openings, ai exposure, and degree of automation. It appears that this represents those jobs in which mistakes are serious, the physical conditions are demanding, but where the wages are high and the employment is still growing. This likely captures high wage healthcare and engineering roles where error stakes are elevated, and where AI exposure is notably low.
+
+PC3 (representing 12% of variance) appears to represent the occupations that are automated and time sensitive versus those that are creative. PC3 separates jobs that may already be automated versus those that could be at risk of automation as AI capabilities increase into more creatively dominated fields.
+
+PC4 (representing 11.6% of variance) is defined mainly by the level of contact with others, and annual openings. This likely captures high-volume, people-facing occupations.
+
+Finally, PC5 (only 7% of variance) is driven mostly by time pressures, degree of automation, and employee percentage change of the occupation. It likely separates occupations with intense time demands from those which are highly automated.
+
+Past this point, PCs contribute significantly less meaningfully to the overall variance in the data.
+
+------------------------------------------------------------------------
+
+**Choosing Number of Components**
+
+While considering our PCA code output, we should also create some graphs to visualize the relevance of the variables to determine the best option.
+
+[**Elbow Method**]{.underline}
+
+```{r screeplot}
+# Screeplot
+fviz_screeplot(pca, addlabels = TRUE,
+               title = "Screeplot: Variance Explained by Each PC")
+```
+
+According to our elbow plot, we see the sharpest decrease in variance explained between PC1 and PC2. The "elbow" of the plot appears around PC3 or PC4, where the variance explained begins to flatten.
+
+[**Cumulative Variance Method**]{.underline}
+
+```{r cumvar}
+# Cumulative variance 
+var_explained <- cumsum(pca$sdev^2 / sum(pca$sdev^2))
+
+data.frame(PC = 1:length(var_explained),
+           CumulativeVar = var_explained) |>
+  ggplot(aes(x = PC, y = CumulativeVar)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_hline(yintercept = 0.8, linetype = "dashed", color = "red") +
+  labs(title = "Cumulative Variance Explained",
+       subtitle = "Red line: 80% threshold",
+       x = "Number of Components", y = "Cumulative Proportion") +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+
+On our cumulative variance plot, we can see that just above 5 components explains 80% of the variance. From our PCA output, we could see that 5 components together explain 78.4% of total variance, and 6 components reach **84.3%**.
+
+[**Kaiser Criterion**]{.underline}
+
+```{r kaiser}
+# Kaiser criterion 
+eigenvalues <- pca$sdev^2
+
+data.frame(PC = 1:length(eigenvalues), Eigenvalue = eigenvalues) |>
+  ggplot(aes(x = PC, y = Eigenvalue)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  labs(title = "Kaiser Criterion: Retain PCs with Eigenvalue > 1",
+       x = "Principal Component", y = "Eigenvalue") +
+  theme_minimal()
+
+```
+
+The Kaiser Criterion dictates that we retain all PCs with an eigenvalue (standard deviation squared) greater than 1. From our plot, we visualize that we should retain 4 components.
+
+[**Decision**]{.underline}
+
+Given our 3 methods, I believe it would be defensible to retain 4 components. This respects our elbow plot, satisfies the Kaiser criterion, while still explaining about 70% of the variance.
+
+------------------------------------------------------------------------
+
+#### 4.4 Exploring Our Components
+
+Now that we have completed our PCA calculation and visualizations, we can further examine each component and what is reveals about trends in our data.
+
+[**PC 1: Automation Vulnerability - Paying More for Less?**]{.underline}
+
+Here, we can reexamine the loadings of our first principal component.
+
+```{r pc1loadings}
+# PC1 loadings
+loadings_pc1 <- pca$rotation[, 1]
+barplot(sort(loadings_pc1), las = 2, col = "steelblue",
+        main = "PC1 Loadings (Sorted)",
+        ylab = "Loading",
+        cex.names = 0.7)
+abline(h = 0, col = "gray", lty = 2)
+```
+
+Based on our loadings, we could interpret PC1 as sort of "automation vulnerability index". We see that negative loadings are variables associated with high skill occupations that require a higher level of education. In contrast, we see that the positive loading variables are associated with manual labor.
+
+Let's visualize, in a new way, what variables contribute to PC1.
+
+```{r pc1_varcontr}
+fviz_contrib(pca, choice = "var", axes = 1,
+             title = "Variable Contributions to PC1")
+```
+
+This graph reaffirms our theory, showing that `ai_exposure`, `routine_task_score`, and `education_num` all contribute meaningfully. In total, we have 6 overall variables that contribute meaningfully towards this component.
+
+We can also examine the occupations that are both highest and lowest on our PC 1 scale.
+
+```{r pc1range}
+#lowest PC1 - most cognitive
+print(occ_names[order(pca$x[, 1])][1:10])
+
+# highest PC1 - most manual labor
+print(occ_names[order(pca$x[, 1], decreasing = TRUE)][1:10])
+```
+
+The lists of the top and bottom 10 professions of the scale confirm the previous cognitive vs. manual interpretation of PC1.
+
+------------------------------------------------------------------------
+
+[**PC 2: High-Risk, High-Reward?**]{.underline}
+
+While PC1 likely captures a cognitive vs. manual dimension, what does PC2 represent?
+
+```{r pc2loadings}
+loadings_pc2 <- pca$rotation[, 2]
+barplot(sort(loadings_pc2), las = 2, col = "darkgreen",
+        main = "PC2 Loadings",
+        ylab = "Loading",
+        cex.names = 0.7)
+abline(h = 0, col = "gray", lty = 2)
+
+```
+
+Examining our loadings, we see this principal component is classified by low annual openings, while requiring higher education, receiving higher wages, but high consequence of error. My immediate assumption is that one side of this component may capture high-earning health care professionals, such as surgeons, anesthesiologists, or dentists.
+
+```{r pc2range}
+#occupations with LOWEST PC2 
+print(occ_names[order(pca$x[, 2])][1:5])
+
+#occupations with HIGHEST PC2 - high risk
+print(occ_names[order(pca$x[, 2], decreasing = TRUE)][1:5])
+```
+
+```{r pc2fviz}
+fviz_contrib(pca, choice = "var", axes = 2,
+             title = "Variable Contributions to PC2")
+```
+
+Here, we see again the variables which contribute the most to PC2. The nature of these elements follow the logical assumption of our principal component, as they reflect high-risk fields with a higher median wage.
+
+[**A Side-by-Side Comparison**]{.underline}
+
+Let's compare the loadings of the first two principal components together.
+
+```{r pc1_pc2_loadings}
+# compare PC1 and PC2 loadings side by side
+data.frame(
+  Variable  = rownames(pca$rotation),
+  PC1       = pca$rotation[, 1],
+  PC2       = pca$rotation[, 2]
+) |>
+  pivot_longer(cols = c("PC1", "PC2"),
+               names_to = "Component", values_to = "Loading") |>
+  ggplot(aes(x = reorder(Variable, abs(Loading)), y = Loading, fill = Component)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(title = "Comparing PC1 and PC2 Loadings",
+       x = "Variable", y = "Loading") +
+  scale_fill_manual(values = c("PC1" = "#2E75B6", "PC2" = "#CD5C5C")) +
+
+    theme_minimal()
+
+```
+
+An interesting note is that AI exposure barely influences our PC2, suggesting that vulnerability to AI and being a high-risk jobs seem to be highly independent. One reason for this could be that jobs which fall into the high-risk high-reward sectors are those sectors where the adoption of AI prematurely could be catastrophic. Because AIOE score is measured on how much of the job could technically be done by AI, it could also mean that we have not developed AI into these fields for multiple reasons: due to both scientific limitations, and the consensus of the risks that we still prefer to entrust with a human.
+
+------------------------------------------------------------------------
+
+#### 4.5 Visualizations
+
+Here, we examine some visualizations to help us understand our principal components and the variables that influence them.
+
+[**Biplot**]{.underline}
+
+```{r biplot}
+fviz_pca_biplot(pca,
+                repel = TRUE,
+                col.var = "black",
+                habillage = occ_sector,
+                addEllipses = TRUE,
+                ellipse.type = "confidence",
+                label = "var",
+                palette = "jco",
+                legend.title = "Sector") +
+  labs(title = "Occupations and Variables Together") +
+  theme_minimal()
+```
+
+This biplot shows the two dimensional structure that we noted in our loadings. PC1 separates the cognitively dominated sectors on the left which are highly exposed to AI automation, from the manual and physical sectors seen on the right. PC2 shows the secondary dimension of high risk jobs. We see groupings of occupations in similar sectors, such as education and construction.
+
+[**Variable Correlation Circle**]{.underline}
+
+```{r varcorr_circle}
+fviz_pca_var(pca,
+             col.var        = "contrib",
+             gradient.cols  = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel          = TRUE) +
+  labs(title = "Variable Contributions to Principal Components") +
+  theme_minimal()
+```
+
+Our correlation circle output confirms our interpretations of the strongest contributors to the first two principal components. This is indicated by their color as well as their length. Variables such as annual openings and the degree of automation are not strong contributors. The opposite direction of AI exposure with variables like routine task score on the horizontal axis signifies a strong negative correlation. Finally, we can see a clustering of education, log median wage, and creativity level, which indicates a close relationship between these three dimensions.
+
+[**Score Plot with Occupation Labels**]{.underline}
+
+```{r scoreplot}
+data.frame(z1 = pca$x[, 1],
+           z2 = pca$x[, 2],
+           occupation = occ_names,
+           sector = occ_sector) |>
+  ggplot(aes(z1, z2, label = occupation, color = sector)) +
+  geom_point(size = 1, alpha = 0.6) +
+  ggrepel::geom_text_repel(size = 2.5, max.overlaps = 20) +
+  labs(title = "Occupations in PC Space",
+       x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 7))
+```
+
+The score plot places individual occupations in PC space, revealing which roles anchor each dimension.
+
+On the PC1 axis, the left side of the plot is dominated by the occupations we would expect given our first principal component. These are the cognitively complex jobs, and in opposition on the right we see jobs such as rotary drill operators, freight movers, and tank car loaders.
+
+The PC2 axis, going from top to bottom, moves from careers such as nurse anesthetists, dentists, chemical engineers, towards careers such as salespersons, receptionists, and telemarketers.
+
+We can observe some careers that are located low and to the left, such as writers or authors, which reflect their low physical and error risk while being cognitively demanding. In opposition, we also see crafts persons located on the center right, belonging to a creative but still manual field.
+
+Based on the sector coloring, we can observe natural clustering, while also observing some outliers that stray further from their sector bubble.
+
+[**Data Reconstruction from PCA**]{.underline}
+
+Here, I will examine how much information we lose in the dimensional reduction. I will examine an occupation in the computer science field as a case study.
+
+```{r datareconstruction}
+X_scaled <- scale(X)
+reconstruction_2pc <- pca$x[, 1:2] %*% t(pca$rotation[, 1:2])
+
+# here, I search for occupations with they key word being computers
+occ_names[str_detect(occ_names, "Computer")]
+#I will use computer and information systems managers
+
+# compare original vs reconstructed for
+occ_idx <- which(occ_names == "Computer and information systems managers")
+
+data.frame(
+  Variable = colnames(X),
+  Original = as.numeric(X_scaled[occ_idx, ]),
+  Reconstructed = as.numeric(reconstruction_2pc[occ_idx, ])
+) |>
+  pivot_longer(cols = c("Original", "Reconstructed"),
+               names_to = "Type", values_to = "Value") |>
+  ggplot(aes(x = Variable, y = Value, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Computer and Info systems: Original vs 2-PC Reconstruction") +
+  scale_fill_manual(values = c("Original" = "#2E75B6", "Reconstructed" = "#E7B800")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+Here, we can see that the two principal components can reduce the full 13 numeric variables while still capturing general trends in the original information. The elements of `ai_exposure`, `education_num`, and `log_median_wage` match decently well across the original and reconstructed data. There are, however, large gaps between some variables such as `log1p_nnual_openings`, `degree_of_automation`, `time_pressure`, and `thinking_creatively`. These strengths and limitations confirm that while the two components capture the major trends of the data, these trends would likely be better captured by a larger number of components.
+
+```{r reconstructionerror}
+# reconstruction error by number of components
+errors <- sapply(1:ncol(X), function(k) {
+  recon <- pca$x[, 1:k, drop = FALSE] %*% t(pca$rotation[, 1:k, drop = FALSE])
+  mean((X_scaled - recon)^2)
+})
+
+data.frame(Components = 1:length(errors), MSE = errors) |>
+  ggplot(aes(x = Components, y = MSE)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  labs(title = "Reconstruction Error vs Number of Components",
+       x = "Number of PCs", y = "MSE") +
+  theme_minimal()
+```
+
+This plot of the reconstruction error curve confirms the component selection decisions. We can see the error dropping steeply through the first 5 components. After that, the rate of improvement across the principal components flattens more drastically. Again, this shows that retaining 4 or 5 components would capture the data structure best without adding unnecessary complexity. The two component solution is good for 2D visualization, although we can see the MSE is approximately 0.55. This signifies that a large proportion of variance in occupations is not represented by the two dimensional plots.
+
+------------------------------------------------------------------------
+
+#### 4.6 Outlier Detection
+
+PCA can help identify occupations with unusual profiles, or those those that do not fit neatly into the main patterns of the data.
+
+```{r outliers}
+# Occupations with extreme PC1 scores
+extreme_df <- data.frame(
+  Occupation = occ_names,
+  Sector = occ_sector,
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2]
+)
+
+#lowest PC1, cognitive
+print(head(extreme_df |> arrange(PC1) |> select(Occupation, Sector, PC1), 8))
+
+#highest PC1, manual
+print(head(extreme_df |> arrange(desc(PC1)) |> select(Occupation, Sector, PC1), 8))
+```
+
+This reveals which occupations are sitting on the extreme ends of PC1 axis. The most negative scores being almost exclusively teachers and management occupations reveal the high AI exposure, educational requirements, and cognitive demand, along with low physical intensity. The most positive scores belong to construction and transportation, all being very physically intensive. We can see the clear sector distinction.
+
+#### 4.7 Mahalanobis Distance
+
+Mahalanobis distance across the first 5 PCs will identify occupations that have an unusual combination of characteristics, which don't fit neatly into the overall data structure. It can help us to identify more complex patterns and outliers we may not easily identify otherwise.
+
+```{r mahalanobis_distance}
+# Multivariate outliers using Mahalanobis distance on first 5 PCs
+scores_4pc <- pca$x[, 1:4]
+mah_dist <- mahalanobis(scores_4pc, colMeans(scores_4pc), cov(scores_4pc))
+
+data.frame(Occupation = occ_names, Sector = occ_sector, MahalanobisDist = mah_dist) |>
+  arrange(desc(MahalanobisDist)) |>
+  head(10) |>
+  print()
+```
+
+This reveals interesting patterns about certain occupations in the data set.
+
+We can see that the occupations of cashiers and retail salespersons are the most extreme multivariate outliers. This is logical, as they have a unique combination of high annual openings, moderate AI exposure, while requiring high social contact and earning low wages. Waiters and waitresses follow a similar logic.
+
+Wind turbine service technicians are unique in their level of physical risk with extreme employment growth. Craft artists likely follow an opposing trend, which combines high creativity elements with lower wages and openings.
+
+Within the highly skilled cluster, nurse practitioners stand out as an outlier. This may be due to their required degree of education, wages, error stakes, and possibly physical demand.
+
+This analysis reveals that occupational outliers can arise from unique combinations created in the labor market, compensations, and job description.
+
+------------------------------------------------------------------------
+
+#### 4.8 PCA Conclusions
+
+Through principal component analysis, we see that nearly 80% of the variance in our dataset can be captured across 5 principal components. The most variance is captured within component 1, which likely demonstrates differences between cognitive complexity and manual labor. Notably, the cognitively skilled profession face higher AI exposure. The second component captures "high-risk high-reward" jobs, those requiring high education and physical hazards, but earning high wages.
+
+The first two components could also explain not only what AI is capable of, but also the types of jobs we trust AI to do. This could be revealing the relationship between AI capability and AI adoption in high-risk professions. While PC1 captures the technical abilities of AI, PC2 may be capturing social readiness to hand over certain responsibilities to AI. We may trust AI even for legal advice, but not as medical professionals.
+
+Given our complete analysis, including our reconstruction error analysis, we determine that 4 PCs are best used to meaningfully summarize our dataset. The original variables can be reasonably summarized with these 4 dimensions, which explain elements such as cognitive complexity, risk level, creativity level, and people-facing work.
+
+Lastly, visualizations such as the biplot demonstrate that the two-dimensional PCA space captures occupational structure that aligns with the labor market divisions in our data, which provides a strong foundation for the following clustering and analysis.
+
+------------------------------------------------------------------------
+
+## 5. Clustering {#clustering}
+
+#### 5.1 Introduction
+
+Now, we will examine whether our observations (occupations) can be organized automatically based on our variable indicators. The goal is to reveal groupings based on the natural interaction of variables, uncovering patterns that transcend simple sector classification. First, we must define how we will define our clusters in terms of their similarity. It will be represented by physical "closeness" in our plotting space.
+
+#### 5.2 Distance Measures
+
+Before clustering, we must scale the raw numeric variables so that no single variable dominates the distance calculation. Then, we will calculate our distance measures which serve as a proxy for "closeness" or relationships between observations, the assumption being that closer points are more closely related than further ones. First, we will compute both Euclidean and Manhattan distances to compare.
+
+```{r distmeasures}
+# scale the raw numeric matrix
+X_scaled <- scale(X)
+
+# Compare distance matrices
+d_eucl <- dist(X_scaled, method = "euclidean")
+d_manh <- dist(X_scaled, method = "manhattan")
+
+# pairwise distances
+head(as.matrix(d_eucl)[1:5, 1:5])
+head(as.matrix(d_manh)[1:5, 1:5])
+```
+
+From the table, we can see that there is meaningful variation between occupations when the numeric variables are scaled. Observations 1 and 4 are the closest pair across both methods. Observation 2 is the furtherest from the others. When applying manhattan, the distances are larger, given the way metrics are aggregated. However, the distance patterns across both methods remains the same. For this reason, we can see that our distance outputs are robust across both methods. Both methods probably perfom equally well, so we can use Euclidean distance as our method.
+
+------------------------------------------------------------------------
+
+#### 5.3 K-Means Clustering
+
+[**Choosing K**]{.underline}
+
+K-means requires a predetermined number of clusters. If choosing a k (number of clusters) intuitively, I argue that we could expect around 5 conceptual clusters based loosely around the different job sectors present in our data.
+
+```{r uniquesectors}
+unique(data$sector)
+```
+
+Examining our unique sectors in the data set, these could theoretically be...
+
+-   Blue Collar: Protective Service, Food Preparation, Building & Grounds, Farming & Fishing, Construction, Installation & Repair, Production, Transportation
+
+-   White Collar: Management, Business & Financial, Legal, Sales, Office & Admin Support
+
+-   Creative Fields: Community & Social Service, Education, Arts & Media, Personal Care
+
+-   Healthcare: Healthcare Practitioners, Healthcare Support
+
+-   STEM Fields: Architecture & Engineering, Computer & Math, Life & Physical Science
+
+However, rather than choosing randomly, we can use other methods to give us insight into the best choice for our data. We will test the within-cluster sum of squares, the average silhouette, and the gap statistic.
+
+[**Plots**]{.underline}
+
+```{r clusterplots}
+set.seed(651)
+#elbow plot
+fviz_nbclust(X_scaled, kmeans, method = "wss", k.max = 15, nstart = 100)
+#silhouette plot
+fviz_nbclust(X_scaled, kmeans, method = "silhouette", k.max = 15, nstart = 100)
+#gapstat plot
+fviz_nbclust(X_scaled, kmeans, method = "gap_stat", k.max = 10, nstart = 100, nboot = 200)
+```
+
+Based on our plot outputs, we see contrasting suggests for the best number of clusters. The silhouette peaks at k=2, suggesting the most statistically clear solution, but this is too broad for meaningful interpretation. The elbow begins to flatten around k=4, and domain knowledge of labor market structure supports four meaningful occupational groupings. We therefore proceed with k=4.
+
+[**Fitting K-Means**]{.underline}
+
+Here, we select **k = 4** as our number of clusters.
+
+```{r numclusters}
+k <- 4
+set.seed(651)
+fit_km <- kmeans(X_scaled, centers = k, nstart = 1000)
+```
+
+[**Cluster Sizes**]{.underline}
+
+Examining our cluster sizes, we see that cluster 2 contains the most number of observations, around 200.
+
+```{r clustersize}
+barplot(table(fit_km$cluster), col = "steelblue",
+        main = paste("Cluster Sizes (k =", k, ")"),
+        xlab = "Cluster", ylab = "Observation Count")
+```
+
+[**Cluster Centers**]{.underline}
+
+The cluster centers show the average value of each variable within each cluster. Since the data is scaled, bars above zero mean that cluster scores higher than average on that variable, and bars below zero mean lower than average.
+
+```{r clustercenters}
+centers <- fit_km$centers
+
+par(mfrow = c(2, 3))
+for (i in 1:k) {
+  barplot(centers[i, ],
+          main  = paste("Cluster", i, "Center"),
+          las   = 2,
+          col   = "steelblue",
+          ylim  = c(min(centers), max(centers)))
+}
+par(mfrow = c(1, 1))
+```
+
+Cluster 1 appears to be the manual and physical group. It is characterized by high routine task scores, physical hazard, and consequence of error. Cluster 2 is the high-skill, and AI-exposed group. It shows high AI exposure and education, and strong creative thinking. Cluster 3 shows an above average AI exposure and wages, but it has lower physical hazard and routine tasks. This maybe suggests a mix of professional and administrative roles. Cluster 4 has the lowest AI exposure, low education, low wages, and low consequence of error. That probably identifies it as the high-turnover, lower-skill group, which would include occupations in the customer service industry.
+
+[**Visualizing Clusters in PC Space**]{.underline}
+
+Next, we will project the clusters onto the first two principal components to visualize the groupings.
+
+```{r clusterspcspace}
+fviz_cluster(fit_km, data = X_scaled,
+             geom = c("point"),
+             ellipse.type = "norm",
+             pointsize = 1) +
+  theme_minimal() +
+  geom_text(label = occ_names, hjust = 0, vjust = 0, size = 2, check_overlap = TRUE) +
+  scale_fill_brewer(palette = "Paired") +
+  labs(title = "K-Means Clusters",
+       subtitle = "Colored by cluster")
+```
+
+This reveals a clear spatial structure. Cluster 2 (green) sits on the far left of Dim1, capturing the cognitively advanced occupations such as lawyers, chief executives, marketing managers, and computer and information systems managers. Cluster 1 (red) occupies the upper right, grouping the high-stakes professions such as dentists, oral surgeons, nurse anesthetists, and aerospace engineers. This is consistent with our PC2 interpretation of high-risk, high-reward work. Cluster 3 (blue) covers the center and lower portion of the space, grouping mixed and routine occupations. Cluster 4 (purple) pulls toward the right and overlaps with Cluster 3, capturing trade and manual occupations such as cement masons, landscaping workers, and food preparation workers.
+
+Wind turbine service technicians appear as a notable outlier sitting well above all clusters on Dim2. This reflects their unique combination of high physical hazard, growing employment, and low AI exposure. Overall, the spatial separation confirms that the four clusters represent genuinely distinct occupational profiles that are recoverable from the data without any sector labels.
+
+[**Interpreting Clusters by Sector Composition**]{.underline}
+
+To interpret what each cluster represents, we can also examine which occupational sectors (having been excluded from the clustering) fall within each cluster. This allows us to see if there is significant overlap.
+
+```{r clusters_sectors}
+#create the cluster df
+cluster_df <- data.frame(
+  occupation = occ_names,
+  sector = occ_sector,
+  cluster = factor(fit_km$cluster)
+)
+
+cluster_df |>
+  dplyr::count(cluster, sector) |>
+  ggplot(aes(x = sector, y = n, fill = cluster)) +
+  geom_col(position = "fill") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Sector Composition by K-Means Cluster",
+       x = NULL, y = "Proportion", fill = "Cluster") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 9))
+```
+
+Cluster 2 dominates the cognitive and professional sectors, capturing sectors like Computer & Math, Life & Physical Science, Management, Legal, Architecture & Engineering, and Business & Financial. Cluster 1 covers much of the manual occupations including Construction, Transportation, Installation & Repair, and Farming & Fishing. Cluster 3 occupies the middle ground, capturing Office & Admin Support, Healthcare Practitioners, Healthcare Support, and Community & Social Service. This reflects its mixed profile of routine and people-facing occupations. Cluster 4 has many occupations in Food Preparation, Production, Personal Care, and Building & Grounds. This captures the lower-skill, high-turnover occupations which were identified earlier as multivariate outliers in the PCA section.
+
+[**Variable Exploration: Mean AI Exposure by Cluster**]{.underline}
+
+A core research question is whether the clusters differ meaningfully in terms of AI exposure. Now that we have created our clusters, unsupervised, we can perform a post-hoc interpretation to examine how they differ when it comes to our variable of interest, AI-exposure. Here, we examine the mean AI exposure score for each cluster.
+
+```{r ai_cluster}
+cluster_df |>
+  left_join(data |> select(occupation, ai_exposure), by = "occupation") |>
+  group_by(cluster) |>
+  summarise(
+    mean_ai = mean(ai_exposure, na.rm = TRUE),
+    mean_wage = mean(exp(data$log_median_wage[match(occupation, data$occupation)]), na.rm = TRUE),
+    n = n()
+  ) |>
+  ggplot(aes(x = cluster, y = mean_ai, fill = cluster)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Mean AI Exposure Score by Cluster",
+       x = "Cluster", y = "Mean AIOE Score") +
+  theme_minimal()
+```
+
+Here, we see that Cluster 2 has the highest mean exposure to AI. This follows the logical that cognitively advanced and high-skill jobs with less physical risk are the most exposed to AI. Conversely, Cluster 4 has the lowest mean AI exposure, showing that physically demanding jobs are insulated from AI automation.
+
+------------------------------------------------------------------------
+
+#### 5.4 Hierarchical Clustering
+
+Next, we will implement hierarchical clustering and produces a dendrogram that reveals the nested structure of the data. This allows us to examine how occupations form groups at different levels of similarity, without pre-specifying k.
+
+[**Linkage Method Comparison**]{.underline}
+
+Here, we compare four types of linkage methods to understand the structure of our data while producing different cluster shapes.
+
+```{r linkmethod}
+d <- dist(X_scaled, method = "euclidean")
+
+par(mfrow = c(2, 2))
+plot(hclust(d, method = "single"), main = "Single Linkage", labels = FALSE)
+plot(hclust(d, method = "complete"), main = "Complete Linkage", labels = FALSE)
+plot(hclust(d, method = "average"), main = "Average Linkage", labels = FALSE)
+plot(hclust(d, method = "ward.D2"), main = "Ward Linkage", labels = FALSE)
+par(mfrow = c(1, 1))
+```
+
+Here, we see that single linkage produces one dominant branch overtakes everything, making it meaningless for our goal of identifying groups. Both the complete and average linkage also lack clear separation. Ward linkage shows a smaller number of distinct branches, and is the best fit. Therefore, we will proceed with Ward.
+
+[**Classical Dendrogram**]{.underline}
+
+This dendrogram helps us visualize the "internal process" of our hierarchical clustering process, even though we cannot read the individual labels.
+
+```{r dendogram}
+d <- dist(X_scaled, method = "euclidean")
+hc <- hclust(d, method = "ward.D2")
+hc$labels <- occ_names
+
+fviz_dend(x = hc,
+          k = 4,
+          palette = "jco",
+          rect = TRUE, rect_fill = TRUE, cex = 0.5,
+          rect_border = "jco")
+```
+
+The dendrogram reveals the hierarchical structure of the data. The most fundamental split occurs at the top, dividing occupations into two broad families. The right branch then subdivides further, and we end up with our 4 clusters, which is shown by the colored rectangles. Although individual labels are not legible at this sample size, the overall structure confirms that the four groups emerge naturally from the data rather than being forced
+
+[**Phylogenic Tree**]{.underline}
+
+This phylogenic tree allows us to examine our hierarchical clustering more in depth.
+
+```{r phylogenictree}
+fviz_dend(x = hc,
+          k = 4,
+          color_labels_by_k = TRUE,
+          cex = 0.35,          # reducing overlap
+          type = "phylogenic",
+          repel = TRUE,
+          phylo_layout = "layout.gem") +  
+  labs(title = "Phylogenic Tree: Occupational Clustering") +
+  theme(axis.text.x = element_blank(), axis.text.y = element_blank())
+```
+
+The phylogenic tree confirms the previous k selection, with 4 distinct color-coded branches. Cluster 1 (red) dominates the upper portion of the tree and contains the cognitive, high-skill occupations. Cluster 4 (purple) spans through the middle and lower sections, capturing the manual and trade occupations. Cluster 2 (blue) appears in concentrated pockets and picks up the mixed, people-facing occupations including healthcare support, administrative roles, and community service workers. Cluster 3 (green) is the smallest and most compact group, visible on the right side, consistent with its role as a distinct subset of skilled trade occupations.
+
+Overall, the tree arrives similar groupings to k-means without any pre-specified value of k. This reinforces our confidence that the four-cluster structure reflects genuine patterns in the data.
+
+#### 5.5 Method Comparison
+
+[**Cutting the Tree and Comparing to K-Means**]{.underline}
+
+Here, we will cut the dendrogram at k = 4 for hierarchical clustering, and compare the resulting groups to the k-means solution to assess the consistency.
+
+```{r comparingmethods}
+groups_hc <- cutree(hc, k = 4)
+
+# compare k-means and hierarchical cluster assignments
+table(KMeans = fit_km$cluster, Hierarchical = groups_hc)
+```
+
+Cluster 2 in k-means maps almost perfectly to Hierarchical Cluster 1. It has 216 out of 221 occupations assigned to the same group. This is the strongest agreement in the table and confirms that the high-skill, AI-exposed occupations form a very stable group regardless of method.
+
+Cluster 4 in k-means matches strongly to Hierarchical Cluster 4, with 120 out of 136 occupations sharing the same group. This confirms the uniqueness of the lower-skill, high-turnover group.
+
+Cluster 3 also matches strongly to Hierarchical Cluster 2 (116 out of 137 observations).
+
+The weakest matching is in Cluster 1. Here, 110 occupations match with Hierarchical Cluster 3. However, 26 go to Cluster 1 and 20 to Cluster 2. We can interpret this as the manual and trade occupations being the largest and most heterogeneous group. This makes them the hardest to divide across methods.
+
+This table reinforces that the four-cluster structure reflects genuine patterns in the data.
+
+[**Sector Composition in Hierarchical Clusters**]{.underline}
+
+```{r hierarchical_sectors}
+data.frame(
+  occupation = occ_names,
+  sector = occ_sector,
+  cluster = factor(groups_hc)
+) |>
+  dplyr::count(cluster, sector) |>
+  ggplot(aes(x = sector, y = n, fill = cluster)) +
+  geom_col(position = "fill") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title    = "Sector Composition by Hierarchical Cluster (k = 4)",
+       x = NULL, y = "Proportion", fill = "Cluster") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 9))
+```
+
+The hierarchical clustering mirrors the k-means result, with some differences in how sectors are distributed. Cluster 1 dominates the cognitive and professional sectors. Cluster 4 covers most of the manual and trade sectors. Cluster 2 captures the mixed and people-facing occupations. Cluster 3 is the smallest group, and it likely captures a subset of skilled trade occupations. The alignment across both methods plot's reinforces that both are recovering the same underlying structure in the data.
+
+------------------------------------------------------------------------
+
+#### 5.6 Clustering Conclusions
+
+Both methods of clustering (k-means and hierarchical) reveal 4 meaningful groups of occupations, and the agreement across both methods suggests that this structure is robust. These are consistent with our logical, sector-based assumption, as well as the diagnostics of our elbow, silhouette, and gap statistic methods. They also correspond with our conceptual groupings discovered in our PCA section.
+
+Our sector variable (which was excluded from our clustering), aligns very well with the clusters discovered by the model. This further validates that this unsupervised method has revealed true structures which exist in the data.
+
+The cluster with the highest mean AI exposure contains predominantly white-collar occupations, including those in management, legal, and computer science. This answers the second part of our research question: workers in cognitively demanding, high-paying, and highly educated occupations face the greatest risk of AI replacement, while manual trade occupations remain comparatively insulated.
+
+------------------------------------------------------------------------
+
+## 6. Conclusions, Findings, and Limitations {#conclusions-findings-and-limitations}
+
+This project applied PCA and clustering to a merged dataset of 665 U.S. occupations, drawn from BLS Employment Projections, Felten et al.'s AIOE index, and O\*NET work characteristics. The goal was to determine whether meaningful occupational groupings exist in the data, and what those groupings could reveal about AI vulnerability.
+
+PCA revealed that the 13-variable dataset is organized around approximately four principal components, the most important being a cognitive vs. manual scale that explains about 30% of total variance. This dimension directly captures AI vulnerability, as occupations requiring high education and knowledge-based tasks score negatively on PC1 while carrying the highest AIOE scores. Conversely, manual and routine occupations remain more insulated. The second component demonstrates high-stakes, high-wage occupations. AI exposure loaded near zero on this component. This could suggest that social readiness constrains AI adoption in high-risk fields, alongside the restraints of AI development capabilities.
+
+Both k-means and hierarchical clustering were applied creating four occupational groups, as informed by our natural occupational sectors. The cluster with the highest mean AI exposure is dominated by computer science, legal, and business related occupations. Manual trade clusters included occupations in areas such as construction, transportation, and production, which showed the lowest exposure to AI replacement. The service industry outliers identified in PCA, including cashiers, waiters, and salespersons, were in their own distinct cluster in both methods.
+
+While revealing structurally relevant patterns in our dataset, we must acknowledge these model's limitations. The key limitation is that the AIOE captures software AI exposure specifically, and does not account for physical automation risk. This gap that disproportionately affects the manual occupations found to be most insulated here, although the variable `degree_of_automation` was included in an attempt to proxy AI exposure in manual trades.
+
+Overall, this model confirms an interesting and somewhat alarming new trend; one that challenges the long-held assumption that a high level of education and cognitive complexity provide security in the modern day labor market.
