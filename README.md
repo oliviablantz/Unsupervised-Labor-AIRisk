@@ -28,9 +28,9 @@ This project analyzes 665 U.S. occupations to uncover hidden structure in the la
 
 ## Files
 
--   `Unsupervised_USJobMarket.Rmd` - Main analysis script and R Markdown
+-   `Unsupervised_JobMarket.Rmd` - Main analysis script and R Markdown
 
--   `Unsupervised_USJobMarket.html` - Rendered report output — [view in browser here](https://htmlpreview.github.io/?https://github.com/oliviablantz/Unsupervised-Labor-AIRisk/blob/main/Unsupervised_USJobMarket.html)
+-   `Unsupervised_JobMarket.html`
 
 -   `occupation.xlsx` - BLS Employment Projections data
 
